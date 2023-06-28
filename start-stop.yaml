@@ -1,0 +1,129 @@
+Parameters:
+  TagKey:
+    Type: String
+    Default: environment
+  TagValue:
+    Type: String
+    Default: dev
+  StartCronExpression:
+    Type: String
+    Default: cron(0 8 * * ? *)
+  StopCronExpression:
+    Type: String
+    Default: cron(0 18 * * ? *)
+
+Resources:
+  EventBridgeInvokeLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaFunction
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt StartStopLambda.Arn
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartStopLambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:log-group:/aws/lambda/StartStopEc2:*
+
+  StartStopLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: StartStopEc2
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Environment:
+        Variables:
+          TAG_KEY: !Ref TagKey
+          TAG_VALUE: !Ref TagValue
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              ec2_resource = boto3.resource('ec2')
+              action = event['action']
+              tag_key = os.environ['TAG_KEY']
+              tag_value = os.environ['TAG_VALUE']
+
+              instances = ec2_resource.instances.filter(
+                  Filters=[{'Name': 'tag:' + tag_key, 'Values': [tag_value]}]
+              )
+
+              for instance in instances:
+                if action == "start":
+                  print(f"Starting instance {instance.id}")
+                  instance.start()
+                elif action == "stop":
+                  print(f"Stopping instance {instance.id}")
+                  instance.stop()
+                else:
+                  return {
+                      'statusCode': 400,
+                      'body': 'Invalid action'
+                  }                  
+
+  StartBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: EventBridge rule to trigger the Lambda function on a schedule
+      ScheduleExpression: !Ref StartCronExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StartStopLambda.Arn
+          Id: StartLambdaFunctionTarget
+          InputTransformer:
+            InputPathsMap:
+              action: "$.action"
+            InputTemplate: '{"action": "start"}'
+  StopBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: EventBridge rule to trigger the Lambda function on a schedule
+      ScheduleExpression: !Ref StopCronExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StartStopLambda.Arn
+          Id: StartLambdaFunctionTarget
+          InputTransformer:
+            InputPathsMap:
+              action: "$.action"
+            InputTemplate: '{"action": "stop"}'
